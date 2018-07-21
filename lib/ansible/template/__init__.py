@@ -49,7 +49,7 @@ from ansible.plugins.loader import filter_loader, lookup_loader, test_loader
 from ansible.template.safe_eval import safe_eval
 from ansible.template.template import AnsibleJ2Template
 from ansible.template.vars import AnsibleJ2Vars
-from ansible.utils.unsafe_proxy import UnsafeProxy, wrap_var, AnsibleDictProxy
+from ansible.utils.unsafe_proxy import UnsafeProxy, wrap_var, AnsibleDictProxy, AnsibleListProxy
 
 try:
     from __main__ import display
@@ -203,7 +203,11 @@ class AnsibleContext(Context):
         class MarkingUnsafeDict(AnsibleDictProxy):
             transform = staticmethod(self._update_unsafe)
 
+        class MarkingUnsafeList(AnsibleListProxy):
+            transform = staticmethod(self._update_unsafe)
+
         self.dict_proxy = MarkingUnsafeDict
+        self.list_proxy = MarkingUnsafeList
 
     def _unsafe(self, val):
         '''
@@ -218,9 +222,8 @@ class AnsibleContext(Context):
 
         if isinstance(val, Mapping):
             val = self.dict_proxy(val)
-        elif isinstance(val, list):
-            for i, item in enumerate(val):
-                val[i] = self._unsafe(item)
+        elif isinstance(val, Sequence):
+            val = self.list_proxy(val)
         return val
 
     def _update_unsafe(self, val):

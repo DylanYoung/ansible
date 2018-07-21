@@ -217,6 +217,120 @@ class AnsibleDictProxy(MutableMapping, AnsibleObjectProxyMixin):
         self._cache = state
 
 
+@python_2_unicode_compatible
+class AnsibleListProxy(MutableSequence, AnsibleObjectProxyMixin):
+    """
+    Abstract mapping that wraps a list, transforming keys and values before
+    returning them.
+
+    Subclasses must provide a callable attribute `transform`, which will be called on
+    values before returning them for te first time. `transform` will NOT be called on values when
+    returning them in the futue.
+
+    `transform` may optionally accept a boolean `resolve`, enabling a method
+    `AnsibleListProxy.resolve` which returns the underlying dict with
+    transform applied to it and `resolve=True`, enabling deep resolution of the proxy.
+    This is not used currently.
+
+    Exceptions raised in `transform` will propagate.
+
+    Implementations Details:
+    - A cache is used to store transformed values on the assumption that value lookups
+      are quite common (and that `transform` might be expensive for them). This means that `transform`
+      should be idempotent and that you should not depend on it being called for every lookup (only the first).
+    - The cache also enables us to Mind Our Own Business, returning values that reside in the cache
+      (and so all values set directly by the user) unaltered.
+    - `__eq__` compares the underlying lists to avoid `transform`ing as much as possible. i.e. we assume
+    - `copy` does not preserve the cache, but pickling and unpickling does
+
+    Known Uses:
+    - AnsibleUnsafeList: inherits from AnsibleUnsafe with `transform` set to `wrap_var`
+    - template.AnsibleContext.list_proxy: `transform` marks the Jinja Context as unsafe when an unsafe
+                                          value is fetched. If the value is a list, rewrap it.
+    """
+    # pass isinstance checks
+    # inheriting directly from list has known issues
+    __class__ = list
+
+    self.SENTINEL_NONE = object()
+
+    def __init__(self, lst):
+        if not self.transform:
+            raise NotImplementedError('Subclasses of AnsibleDictProxy must specify a transform function.')
+
+        if not isinstance(lst, type(self)):
+            self.wrapped_list = lst
+        else:
+            self.wrapped_list = lst.wrapped_list
+
+        self._set_resolve()
+
+        self._cache = [self.SENTINEL_NONE]*len(self.wrapped_list)
+
+    def __getitem__(self, index):
+        cached = self._cache[index]
+        if cached is not self.SENTINEL_NONE:
+            return cached
+        val = self.transform(self.wrapped_list[index])
+        self._cache[key] = val
+
+        return val
+
+    def __setitem__(self, index, val):
+        self.wrapped_list[index] = val
+        self._cache[index] = val
+
+    def __delitem__(self, index):
+        del self.wrapped_list[index]
+        del self._cache[index]
+
+    def __len__(self):
+        return len(self.wrapped_list)
+
+    def __copy__(self):
+        val = type(self)(self.wrapped_list.copy())
+        return val
+
+    def copy(self):
+        return self.__copy__()
+
+    # WARNING: Resolve is potentially data-modifying
+    def resolve(self):
+        assert isinstance(self.wrapped_list, MutableSequence)
+        return self.transform(self.wrapped_list, resolve=True)
+
+    def __iter__(self):
+        for val, cached_val in iter(zip(self.wrapped_list, self._cache)):
+            yield cached_val if cached_val is not self.SENTINEL_NONE else self.transform(val)
+
+    def __len__(self):
+        return len(self.wrapped_list)
+
+    # Avoid MutableMapping's __eq__ as it will copy keys
+    def __eq__(self, other):
+        if isinstance(other, type(self)):
+            other = other.wrapped_list
+        # make the proxy transparent
+        if self.wrapped_list == other:
+            return True
+        return False
+
+    def __str__(self):
+        return u'[{contents}]'.format(
+            contents=', '.join('{item}'.format(item=i for i in self))
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __reduce_ex__(self, protocol):
+        # for pickling; state is passed to __setstate__
+        # -> (constructor, args, state)
+        return (type(self), (self.wrapped_list,), self._cache)
+
+    def __setstate__(self, state):
+        self._cache = state
+
+
 def _wrap_dict(v):
     for k in v:
         if v[k] is not None:
@@ -224,10 +338,10 @@ def _wrap_dict(v):
     return v
 
 
-def _wrap_list(v, resolve=False):
+def _wrap_list(v):
     for idx, item in enumerate(v):
         if item is not None:
-            v[idx] = wrap_var(item, resolve=resolve)
+            v[idx] = wrap_var(item, resolve=True)
     return v
 
 
@@ -238,12 +352,20 @@ def wrap_var(v, resolve=False):
     elif isinstance(v, Mapping):
         v = _wrap_dict(v) if resolve else AnsibleUnsafeDict(v)
     elif isinstance(v, (MutableSequence, Set)):
-        v = _wrap_list(v, resolve=resolve)
+        v = _wrap_list(v) if resolve else AnsibleUnsafeList(v)
     else:
         if v is not None and not isinstance(v, AnsibleUnsafe):
             v = UnsafeProxy(v)
     return v
 
 
-class AnsibleUnsafeDict(AnsibleDictProxy, AnsibleUnsafe):
+class AnsibleUnsafeObjectProxy(AnsibleUnsafe):
     transform = staticmethod(wrap_var)
+
+
+class AnsibleUnsafeDict(AnsibleDictProxy, AnsibleUnsafeObjectProxy):
+    pass
+
+
+class AnsibleUnsafeList(AnsibleListProxy, AnsibleUnsafeObjectProxy):
+    pass
