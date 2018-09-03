@@ -16,11 +16,14 @@ from ansible.utils.unsafe_proxy import AnsibleUnsafe, AnsibleUnsafeDict, wrap_va
 from ansible.parsing.vault import VaultLib
 
 
+ansible_unsafe_obj_classes = {AnsibleUnsafeDict}
+
+
 class AnsibleJSONDecoder(json.JSONDecoder):
 
     _vaults = {}
 
-    unsafe_cls_map = {
+    unsafe_cls_map = {cls.__name__: cls for cls in ansible_unsafe_obj_classes
         'AnsibleUnsafeDict': AnsibleUnsafeDict
     }
 
@@ -61,12 +64,14 @@ class AnsibleJSONEncoder(json.JSONEncoder):
     '''
     Simple encoder class to deal with JSON encoding of Ansible internal types
     '''
+    unsafe_classes = ansible_unsafe_obj_classes
+
     def default(self, o):
         if isinstance(o, AnsibleVaultEncryptedUnicode):
             # vault object
             value = {'__ansible_vault': to_text(o._ciphertext, errors='surrogate_or_strict', nonstring='strict')}
         elif isinstance(o, AnsibleUnsafe):
-            if isinstance(o, AnsibleUnsafeDict):
+            if isinstance(o, self.unsafe_classes):
                 # unsafe dict (or other obj)
                 cls, args, state = o.__reduce_ex__(protocol=2)
                 value = {'__ansible_unsafe_obj': (cls.__name__, args, state)}
